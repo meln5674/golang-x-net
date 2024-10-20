@@ -42,9 +42,19 @@ func NewConfig(server, origin string) (config *Config, err error) {
 
 // NewClient creates a new WebSocket client connection over rwc.
 func NewClient(config *Config, rwc io.ReadWriteCloser) (ws *Conn, err error) {
+	var resp *http.Response
+	ws, resp, err = NewClientOrResponse(config, rwc)
+	if resp != nil {
+		resp.Body.Close()
+	}
+	return
+}
+
+// NewClient creates a new WebSocket client connection over rwc.
+func NewClientOrResponse(config *Config, rwc io.ReadWriteCloser) (ws *Conn, resp *http.Response, err error) {
 	br := bufio.NewReader(rwc)
 	bw := bufio.NewWriter(rwc)
-	err = hybiClientHandshake(config, br, bw)
+	resp, err = hybiClientHandshakeOrResponse(config, br, bw)
 	if err != nil {
 		return
 	}
@@ -55,14 +65,24 @@ func NewClient(config *Config, rwc io.ReadWriteCloser) (ws *Conn, err error) {
 
 // Dial opens a new client connection to a WebSocket.
 func Dial(url_, protocol, origin string) (ws *Conn, err error) {
+	var resp *http.Response
+	ws, resp, err = DialOrResponse(url_, protocol, origin)
+	if resp != nil {
+		resp.Body.Close()
+	}
+	return ws, err
+}
+
+// Dial opens a new client connection to a WebSocket.
+func DialOrResponse(url_, protocol, origin string) (ws *Conn, resp *http.Response, err error) {
 	config, err := NewConfig(url_, origin)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if protocol != "" {
 		config.Protocol = []string{protocol}
 	}
-	return DialConfig(config)
+	return DialConfigOrResponse(config)
 }
 
 var portMap = map[string]string{
@@ -81,16 +101,36 @@ func parseAuthority(location *url.URL) string {
 
 // DialConfig opens a new client connection to a WebSocket with a config.
 func DialConfig(config *Config) (ws *Conn, err error) {
-	return config.DialContext(context.Background())
+	var resp *http.Response
+	ws, resp, err = DialConfigOrResponse(config)
+	if resp != nil {
+		resp.Body.Close()
+	}
+	return ws, err
+}
+
+// DialConfig opens a new client connection to a WebSocket with a config.
+func DialConfigOrResponse(config *Config) (ws *Conn, resp *http.Response, err error) {
+	return config.DialContextOrResponse(context.Background())
 }
 
 // DialContext opens a new client connection to a WebSocket, with context support for timeouts/cancellation.
 func (config *Config) DialContext(ctx context.Context) (*Conn, error) {
+	var resp *http.Response
+	conn, resp, err := config.DialContextOrResponse(ctx)
+	if resp != nil {
+		resp.Body.Close()
+	}
+	return conn, err
+}
+
+// DialContext opens a new client connection to a WebSocket, with context support for timeouts/cancellation.
+func (config *Config) DialContextOrResponse(ctx context.Context) (*Conn, *http.Response, error) {
 	if config.Location == nil {
-		return nil, &DialError{config, ErrBadWebSocketLocation}
+		return nil, nil, &DialError{config, ErrBadWebSocketLocation}
 	}
 	if config.Origin == nil {
-		return nil, &DialError{config, ErrBadWebSocketOrigin}
+		return nil, nil, &DialError{config, ErrBadWebSocketOrigin}
 	}
 
 	dialer := config.Dialer
@@ -100,7 +140,7 @@ func (config *Config) DialContext(ctx context.Context) (*Conn, error) {
 
 	client, err := dialWithDialer(ctx, dialer, config)
 	if err != nil {
-		return nil, &DialError{config, err}
+		return nil, nil, &DialError{config, err}
 	}
 
 	// Cleanup the connection if we fail to create the websocket successfully
@@ -111,12 +151,13 @@ func (config *Config) DialContext(ctx context.Context) (*Conn, error) {
 		}
 	}()
 
+	var resp *http.Response
 	var ws *Conn
 	var wsErr error
 	doneConnecting := make(chan struct{})
 	go func() {
 		defer close(doneConnecting)
-		ws, err = NewClient(config, client)
+		ws, resp, err = NewClientOrResponse(config, client)
 		if err != nil {
 			wsErr = &DialError{config, err}
 		}
@@ -129,11 +170,11 @@ func (config *Config) DialContext(ctx context.Context) (*Conn, error) {
 		// Force the pending operations to fail, terminating the pending connection attempt
 		_ = client.SetDeadline(time.Now())
 		<-doneConnecting // Wait for the goroutine that tries to establish the connection to finish
-		return nil, &DialError{config, ctx.Err()}
+		return nil, resp, &DialError{config, ctx.Err()}
 	case <-doneConnecting:
 		if wsErr == nil {
 			success = true // Disarm the deferred connection cleanup
 		}
-		return ws, wsErr
+		return ws, resp, wsErr
 	}
 }

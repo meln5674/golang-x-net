@@ -22,8 +22,10 @@ import (
 	"time"
 )
 
-var serverAddr string
-var once sync.Once
+var (
+	serverAddr string
+	once       sync.Once
+)
 
 func echoServer(ws *Conn) {
 	defer ws.Close()
@@ -101,6 +103,12 @@ func ctrlAndDataServer(ws *Conn) {
 	}
 }
 
+func badServer(resp http.ResponseWriter, _ *http.Request) {
+	resp.Header().Add("X-A-Test-Header", "a test header")
+	resp.WriteHeader(http.StatusBadRequest)
+	resp.Write([]byte("this is not a websocket"))
+}
+
 func subProtocolHandshake(config *Config, req *http.Request) error {
 	for _, proto := range config.Protocol {
 		if proto == "chat" {
@@ -121,6 +129,7 @@ func startServer() {
 	http.Handle("/echo", Handler(echoServer))
 	http.Handle("/count", Handler(countServer))
 	http.Handle("/ctrldata", Handler(ctrlAndDataServer))
+	http.HandleFunc("/bad", badServer)
 	subproto := Server{
 		Handshake: subProtocolHandshake,
 		Handler:   Handler(subProtoServer),
@@ -154,7 +163,7 @@ func TestEcho(t *testing.T) {
 	if _, err := conn.Write(msg); err != nil {
 		t.Errorf("Write: %v", err)
 	}
-	var actual_msg = make([]byte, 512)
+	actual_msg := make([]byte, 512)
 	n, err := conn.Read(actual_msg)
 	if err != nil {
 		t.Errorf("Read: %v", err)
@@ -398,7 +407,7 @@ func TestSmallBuffer(t *testing.T) {
 	if _, err := conn.Write(msg); err != nil {
 		t.Errorf("Write: %v", err)
 	}
-	var small_msg = make([]byte, 8)
+	small_msg := make([]byte, 8)
 	n, err := conn.Read(small_msg)
 	if err != nil {
 		t.Errorf("Read: %v", err)
@@ -406,7 +415,7 @@ func TestSmallBuffer(t *testing.T) {
 	if !bytes.Equal(msg[:len(small_msg)], small_msg) {
 		t.Errorf("Echo: expected %q got %q", msg[:len(small_msg)], small_msg)
 	}
-	var second_msg = make([]byte, len(msg))
+	second_msg := make([]byte, len(msg))
 	n, err = conn.Read(second_msg)
 	if err != nil {
 		t.Errorf("Read: %v", err)
@@ -662,4 +671,42 @@ func TestCodec_ReceiveLimited(t *testing.T) {
 		}
 	}
 	<-handlerDone
+}
+
+func TestDialOrResponseOnError(t *testing.T) {
+	once.Do(startServer)
+
+	ws, resp, err := DialOrResponse("ws://"+serverAddr+"/bad", "", "http://localhost/")
+	if resp == nil {
+		t.Fatal("did not get a response")
+	}
+	defer func() {
+		err := resp.Body.Close()
+		if err != nil {
+			t.Fatal("failed to close response body", err)
+		}
+	}()
+	if ws != nil {
+		t.Fatal("got a non-nil websocket")
+	}
+	if err == nil {
+		t.Fatal("did not get an error")
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("unexpected response status %s", resp.Status)
+	}
+	h := resp.Header.Get("X-A-Test-Header")
+	if h == "" {
+		t.Fatal("missing expected test header")
+	}
+	if h != "a test header" {
+		t.Fatalf("unexpected value for test header: %s", h)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal("failed to read repsonse body", err)
+	}
+	if string(body) != "this is not a websocket" {
+		t.Fatalf("unexpected value for response body: %s", string(body))
+	}
 }
